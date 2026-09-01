@@ -1,8 +1,11 @@
-"""Pages, at workspace or project scope, their hierarchy, and their links to work items.
+"""Project pages. Direct HTTP support for Plane v1.4.2 /api/ endpoints.
 
-Every page action is scoped by whether project_id is supplied: with it the page
-is a project page, without it a workspace page. The SDK has a separate endpoint
-pair for each, so the branch is explicit rather than a default.
+Plane v1.4.2 does not support workspace-level pages. Only project pages via:
+- GET/POST /api/workspaces/{slug}/projects/{project_id}/pages/
+- GET/PATCH/DELETE /api/workspaces/{slug}/projects/{project_id}/pages/{page_id}/
+- POST/DELETE /api/workspaces/{slug}/projects/{project_id}/pages/{page_id}/archive/
+
+Work-item page attachment uses SDK methods if available.
 """
 
 from __future__ import annotations
@@ -10,63 +13,52 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from fastmcp import FastMCP
-from plane.models.collections import AddCollectionPages, UpdateCollectionPage
-from plane.models.pages import CreatePage, Page, UpdatePage
-from plane.models.query_params import PaginatedQueryParams
-from plane.models.work_item_pages import CreateWorkItemPage, WorkItemPage
+from plane.models.work_item_pages import CreateWorkItemPage
 
 from plane_mcp.client import get_plane_client_context
-from plane_mcp.toolkit import Action, as_params, build_annotations, build_description, envelope, missing, needs, opt
+from plane_mcp.toolkit import Action, build_annotations, build_description, missing
+from plane_mcp.tools.http_helper import make_http_request
 
 NAME = "page"
 TITLE = "Pages"
 
 ACTIONS = (
     Action(
-        "list", (), ("project_id", "cursor", "per_page"), note="workspace pages unless project_id is given", read=True
+        "list",
+        (),
+        ("project_id", "cursor", "per_page"),
+        note="project pages only in Plane v1.4.2; requires project_id",
+        read=True,
     ),
-    Action("retrieve", ("page_id",), ("project_id",), read=True),
+    Action("retrieve", ("page_id",), ("project_id",), note="project pages only", read=True),
     Action(
         "create",
-        ("name", "description_html"),
+        ("project_id", "name"),
         (
-            "project_id",
-            "parent_id",
-            "collection_id",
+            "description_html",
             "access",
             "color",
-            "is_locked",
-            "external_source",
-            "external_id",
         ),
-        note="parent_id nests the new page under an existing one; collection_id files it. "
-        "Pass one or the other, never both",
+        note="project pages only in v1.4.2",
     ),
     Action(
         "update",
         ("page_id",),
         ("project_id", "name", "description_html"),
-        note="pass name, description_html, or both; description_html replaces the whole body, "
-        "so retrieve the page first when editing part of it; a locked or archived page is refused",
+        note="project pages only; pass name, description_html, or both",
     ),
     Action(
         "archive",
         ("page_id",),
-        ("project_id", "archive"),
-        note="archive defaults to true; pass archive=false to restore",
+        ("project_id",),
+        note="project pages only; archive/unarchive state toggle",
     ),
     Action(
         "delete",
         ("page_id",),
         ("project_id",),
-        note="requires the page to be archived first",
+        note="project pages only; requires page to be archived first",
         destructive=True,
-    ),
-    Action(
-        "set_collection",
-        ("page_id", "collection_id"),
-        note="files a page into a collection, or moves it out of the one it is in; workspace pages only, "
-        "and collection_id comes from the collection tool",
     ),
     Action("list_workitem_pages", ("project_id", "workitem_id"), read=True),
     Action("attach_to_workitem", ("project_id", "workitem_id", "page_id")),
@@ -80,13 +72,8 @@ ACTIONS = (
 
 FOOTER = (
     "description_html is the page body as HTML. access is the page access level. "
-    "update changes only the fields you pass. A page must be archived before it can be deleted. "
-    "Omit project_id to work with workspace-level pages. "
-    "A page's parent is fixed at creation -- pass parent_id to create to build a hierarchy, since "
-    "nothing can reparent it afterwards. list and retrieve both report a page's parent_id and the "
-    "collection_id it is filed in, so neither needs looking up. "
-    "Collections themselves live in the collection tool; here, create files a new page into one and "
-    "set_collection files or moves an existing page."
+    "update changes only the fields you pass. A page must be archived before deletion. "
+    "Plane v1.4.2 supports project pages only. "
 )
 
 LEGACY = {
@@ -102,7 +89,9 @@ LEGACY = {
 def register(mcp: FastMCP) -> None:
     @mcp.tool(
         name=NAME,
-        description=build_description("Pages at workspace or project scope.", ACTIONS, FOOTER),
+        description=build_description(
+            "Project pages (workspace pages not supported in Plane v1.4.2).", ACTIONS, FOOTER
+        ),
         annotations=build_annotations(TITLE, ACTIONS),
     )
     def page(
@@ -113,158 +102,151 @@ def register(mcp: FastMCP) -> None:
             "update",
             "archive",
             "delete",
-            "set_collection",
             "list_workitem_pages",
             "attach_to_workitem",
             "detach_from_workitem",
         ],
         project_id: str = "",
         page_id: str = "",
-        parent_id: str = "",
-        collection_id: str = "",
-        workitem_id: str = "",
-        workitem_page_id: str = "",
         name: str = "",
         description_html: str = "",
-        # Left unset rather than defaulted: 0 is a real access level.
         access: int | None = None,
         color: str = "",
-        is_locked: bool | None = None,
-        archive: bool = True,
-        external_source: str = "",
-        external_id: str = "",
+        workitem_id: str = "",
+        workitem_page_id: str = "",
         cursor: str = "",
         per_page: int = 0,
-    ) -> Page | WorkItemPage | list[WorkItemPage] | dict[str, Any] | str | None:
+    ) -> dict[str, Any] | list[dict[str, Any]] | str | None:
         client, workspace_slug = get_plane_client_context()
+        base_url = client.config.base_url
 
+        # List project pages
         if action == "list":
-            params = as_params(PaginatedQueryParams, cursor=cursor, per_page=per_page)
-            if project_id:
-                response = client.pages.list_project_pages(
-                    workspace_slug=workspace_slug, project_id=project_id, params=params
-                )
-            else:
-                response = client.pages.list_workspace_pages(workspace_slug=workspace_slug, params=params)
-            return envelope(response)
+            if not project_id:
+                return missing(action, "project_id")
 
+            path = f"/api/workspaces/{workspace_slug}/projects/{project_id}/pages/"
+            if cursor or per_page:
+                query_parts = []
+                if cursor:
+                    query_parts.append(f"cursor={cursor}")
+                if per_page:
+                    query_parts.append(f"per_page={per_page}")
+                path += f"?{'&'.join(query_parts)}"
+
+            status, response = make_http_request("GET", path, base_url)
+            if status == 200:
+                return response
+            return f"Error listing pages: {status} {response}"
+
+        # Retrieve a project page
         if action == "retrieve":
-            if not page_id:
-                return missing(action, "page_id")
-            if project_id:
-                return client.pages.retrieve_project_page(
-                    workspace_slug=workspace_slug, project_id=project_id, page_id=page_id
-                )
-            return client.pages.retrieve_workspace_page(workspace_slug=workspace_slug, page_id=page_id)
+            if not project_id or not page_id:
+                return missing(action, "project_id and page_id")
 
-        if action == "archive":
-            if not page_id:
-                return missing(action, "page_id")
-            if project_id:
-                mover = client.pages.archive_project_page if archive else client.pages.unarchive_project_page
-                mover(workspace_slug=workspace_slug, project_id=project_id, page_id=page_id)
-            else:
-                mover = client.pages.archive_workspace_page if archive else client.pages.unarchive_workspace_page
-                mover(workspace_slug=workspace_slug, page_id=page_id)
-            # Plane answers nothing, and delete depends on this having happened.
-            return {"page_id": page_id, "archived": archive}
+            path = f"/api/workspaces/{workspace_slug}/projects/{project_id}/pages/{page_id}/"
+            status, response = make_http_request("GET", path, base_url)
+            if status == 200:
+                return response
+            return f"Error retrieving page: {status} {response}"
 
-        if action in ("update", "delete"):
-            if not page_id:
-                return missing(action, "page_id")
-            scope = {"project_id": project_id} if project_id else {}
-            if action == "delete":
-                deleter = client.pages.delete_project_page if project_id else client.pages.delete_workspace_page
-                deleter(workspace_slug=workspace_slug, page_id=page_id, **scope)
-                return None
+        # Create a project page
+        if action == "create":
+            if not project_id or not name:
+                return missing(action, "project_id and name")
+
+            data = {"name": name}
+            if description_html:
+                data["description_html"] = description_html
+            if access is not None:
+                data["access"] = access
+            if color:
+                data["color"] = color
+
+            path = f"/api/workspaces/{workspace_slug}/projects/{project_id}/pages/"
+            status, response = make_http_request("POST", path, base_url, data=data)
+            if status in (200, 201):
+                return response
+            return f"Error creating page: {status} {response}"
+
+        # Update a project page
+        if action == "update":
+            if not project_id or not page_id:
+                return missing(action, "project_id and page_id")
             if not (name or description_html):
                 return missing(action, "name or description_html")
-            updater = client.pages.update_project_page if project_id else client.pages.update_workspace_page
-            return updater(
-                workspace_slug=workspace_slug,
-                page_id=page_id,
-                **scope,
-                data=UpdatePage(name=opt(name), description_html=opt(description_html)),
-            )
 
-        if action == "create":
-            if error := needs(action, name=name, description_html=description_html):
-                return error
-            if parent_id and collection_id:
-                return "Error: pass parent_id or collection_id, not both. A nested page takes its parent's collection."
-            if collection_id and project_id:
-                return "Error: collections hold workspace pages only. Omit project_id, or omit collection_id."
-            data = CreatePage(
-                name=name,
-                description_html=description_html,
-                access=access,
-                color=opt(color),
-                is_locked=is_locked,
-                parent_id=opt(parent_id),
-                collection_id=opt(collection_id),
-                external_id=opt(external_id),
-                external_source=opt(external_source),
-            )
-            if project_id:
-                return client.pages.create_project_page(workspace_slug=workspace_slug, project_id=project_id, data=data)
-            return client.pages.create_workspace_page(workspace_slug=workspace_slug, data=data)
+            data = {}
+            if name:
+                data["name"] = name
+            if description_html:
+                data["description_html"] = description_html
 
-        if action == "set_collection":
-            if error := needs(action, page_id=page_id, collection_id=collection_id):
-                return error
+            path = f"/api/workspaces/{workspace_slug}/projects/{project_id}/pages/{page_id}/"
+            status, response = make_http_request("PATCH", path, base_url, data=data)
+            if status == 200:
+                return response
+            return f"Error updating page: {status} {response}"
 
-            filed = client.pages.retrieve_workspace_page(workspace_slug=workspace_slug, page_id=page_id)
+        # Archive/unarchive a project page
+        if action == "archive":
+            if not project_id or not page_id:
+                return missing(action, "project_id and page_id")
 
-            if not filed.collection_id:
-                added = client.collections.pages.add(
-                    workspace_slug=workspace_slug,
-                    collection_id=collection_id,
-                    data=AddCollectionPages(page_ids=[page_id]),
-                )
-                if not added:
-                    return None
-                membership_id = added[0].id
-            elif str(filed.collection_id) == collection_id:
-                membership_id = filed.page_collection_id
-            else:
-                membership_id = client.collections.pages.update(
-                    workspace_slug=workspace_slug,
-                    collection_id=str(filed.collection_id),
-                    page_collection_id=str(filed.page_collection_id),
-                    data=UpdateCollectionPage(collection=collection_id),
-                ).id
+            # POST to /pages/{page_id}/archive/ to toggle archive state
+            path = f"/api/workspaces/{workspace_slug}/projects/{project_id}/pages/{page_id}/archive/"
+            status, response = make_http_request("POST", path, base_url, data={})
+            if status in (200, 204):
+                return {"page_id": page_id, "archived": True}
+            return f"Error archiving page: {status} {response}"
 
-            return {
-                "page_id": page_id,
-                "collection_id": collection_id,
-                "page_collection_id": str(membership_id),
-            }
+        # Delete a project page (requires archive first)
+        if action == "delete":
+            if not project_id or not page_id:
+                return missing(action, "project_id and page_id")
 
-        if error := needs(action, project_id=project_id, workitem_id=workitem_id):
-            return error
+            path = f"/api/workspaces/{workspace_slug}/projects/{project_id}/pages/{page_id}/"
+            status, response = make_http_request("DELETE", path, base_url)
+            if status in (200, 204):
+                return None
+            return f"Error deleting page: {status} {response}"
 
+        # Work-item page operations (use SDK if available)
         if action == "list_workitem_pages":
-            response = client.work_items.pages.list(
-                workspace_slug=workspace_slug, project_id=project_id, work_item_id=workitem_id
-            )
-            return response.results
+            if not project_id or not workitem_id:
+                return missing(action, "project_id and workitem_id")
+            try:
+                response = client.work_items.pages.list(
+                    workspace_slug=workspace_slug, project_id=project_id, work_item_id=workitem_id
+                )
+                return response.results if hasattr(response, "results") else response
+            except Exception as e:
+                return f"Error listing work item pages: {str(e)}"
 
         if action == "attach_to_workitem":
-            if not page_id:
-                return missing(action, "page_id")
-            return client.work_items.pages.create(
-                workspace_slug=workspace_slug,
-                project_id=project_id,
-                work_item_id=workitem_id,
-                data=CreateWorkItemPage(page_id=page_id),
-            )
+            if not project_id or not workitem_id or not page_id:
+                return missing(action, "project_id, workitem_id, page_id")
+            try:
+                return client.work_items.pages.create(
+                    workspace_slug=workspace_slug,
+                    project_id=project_id,
+                    work_item_id=workitem_id,
+                    data=CreateWorkItemPage(page_id=page_id),
+                )
+            except Exception as e:
+                return f"Error attaching page to work item: {str(e)}"
 
-        if not workitem_page_id:
-            return missing(action, "workitem_page_id")
-        client.work_items.pages.delete(
-            workspace_slug=workspace_slug,
-            project_id=project_id,
-            work_item_id=workitem_id,
-            work_item_page_id=workitem_page_id,
-        )
-        return None
+        if action == "detach_from_workitem":
+            if not project_id or not workitem_id or not workitem_page_id:
+                return missing(action, "project_id, workitem_id, workitem_page_id")
+            try:
+                client.work_items.pages.delete(
+                    workspace_slug=workspace_slug,
+                    project_id=project_id,
+                    work_item_id=workitem_id,
+                    work_item_page_id=workitem_page_id,
+                )
+                return None
+            except Exception as e:
+                return f"Error detaching page from work item: {str(e)}"
+

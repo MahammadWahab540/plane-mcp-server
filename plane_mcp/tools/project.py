@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal, get_args
+from typing import Any, Literal, get_args
 
 from fastmcp import FastMCP
 from plane.models.enums import TimezoneEnum
@@ -77,7 +77,7 @@ ACTIONS = (
     Action("archive", ("project_id",)),
     Action("unarchive", ("project_id",)),
     Action("worklog_summary", ("project_id",), read=True),
-    Action("get_features", ("project_id",), read=True),
+    Action("get_features", ("project_id",), note="derives features from project.retrieve in Plane v1.4.2", read=True),
     Action(
         "update_features",
         ("project_id",),
@@ -100,7 +100,8 @@ ACTIONS = (
 FOOTER = (
     "identifier is the short work item prefix, such as ENG. network is 0 for secret or 2 for public. "
     "project_lead and default_assignee are member ids -- get them from `member list_workspace`. "
-    "Feature toggles are booleans; omitted ones are left as they are."
+    "Feature toggles are booleans; omitted ones are left as they are. "
+    "In Plane v1.4.2, get_features derives data from project.retrieve since no separate endpoint exists."
 )
 
 LEGACY = {
@@ -176,6 +177,7 @@ def register(mcp: FastMCP) -> None:
         | PaginatedProjectLiteResponse
         | PaginatedProjectMemberResponse
         | ProjectFeature
+        | dict[str, Any]
         | list[ProjectWorklogSummary]
         | str
         | None
@@ -280,7 +282,24 @@ def register(mcp: FastMCP) -> None:
             return client.projects.get_worklog_summary(workspace_slug=workspace_slug, project_id=project_id)
 
         if action == "get_features":
-            return client.projects.get_features(workspace_slug=workspace_slug, project_id=project_id)
+            # In Plane v1.4.2, there is no separate get_features endpoint.
+            # Extract feature flags from project.retrieve instead.
+            try:
+                proj = client.projects.retrieve(workspace_slug=workspace_slug, project_id=project_id)
+                # Map project attributes to feature flag names
+                features = {
+                    "module_view": getattr(proj, "module_view", False),
+                    "cycle_view": getattr(proj, "cycle_view", False),
+                    "issue_views_view": getattr(proj, "issue_views_view", False),
+                    "page_view": getattr(proj, "page_view", True),
+                    "intake_view": getattr(proj, "intake_view", False),
+                    "is_time_tracking_enabled": getattr(proj, "is_time_tracking_enabled", False),
+                    "is_issue_type_enabled": getattr(proj, "is_issue_type_enabled", False),
+                    "guest_view_all_features": getattr(proj, "guest_view_all_features", False),
+                }
+                return features
+            except Exception as e:
+                return f"Error retrieving project features: {str(e)}"
 
         return client.projects.update_features(
             workspace_slug=workspace_slug,
@@ -298,3 +317,4 @@ def register(mcp: FastMCP) -> None:
                 workflows=workflows,
             ),
         )
+
