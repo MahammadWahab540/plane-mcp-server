@@ -351,8 +351,8 @@ class PlaneOAuthProvider(OAuthProxy):
         # Authorization: external URL (user's browser)
         # Token exchange: internal URL (server-to-server)
         super().__init__(
-            upstream_authorization_endpoint=f"{plane_base_url_final}/auth/o/authorize-app/",
-            upstream_token_endpoint=f"{plane_internal_url}/auth/o/token/",
+            upstream_authorization_endpoint=f"{plane_base_url_final}/o/authorize/",
+            upstream_token_endpoint=f"{plane_internal_url}/o/token/",
             upstream_client_id=settings.client_id,
             upstream_client_secret=client_secret_str,
             token_verifier=token_verifier,
