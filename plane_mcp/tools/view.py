@@ -1,7 +1,9 @@
 """Project saved views (issue-views). CRUD for filtered/grouped issue lists.
 
 Saved views allow filtering, grouping, and display configuration of work items.
-Only project-level views are supported in Plane v1.4.2.
+Only project-level views are supported in Plane v1.4.2 via:
+- GET/POST /api/workspaces/{slug}/projects/{project_id}/issue-views/
+- GET/PATCH/DELETE /api/workspaces/{slug}/projects/{project_id}/issue-views/{view_id}/
 """
 
 from __future__ import annotations
@@ -12,7 +14,8 @@ from typing import Any, Literal
 from fastmcp import FastMCP
 
 from plane_mcp.client import get_plane_client_context
-from plane_mcp.toolkit import Action, build_annotations, build_description, missing, opt
+from plane_mcp.toolkit import Action, build_annotations, build_description, missing
+from plane_mcp.tools.http_helper import make_http_request
 
 NAME = "view"
 TITLE = "Saved Views (Issue Views)"
@@ -62,45 +65,18 @@ FOOTER = (
 LEGACY = {}
 
 
-def _make_http_request(
-    method: str,
-    path: str,
-    data: dict[str, Any] | None = None,
-    base_url: str = "",
-    headers: dict[str, str] | None = None,
-) -> tuple[int, dict[str, Any]]:
-    """Make authenticated HTTP request to Plane API."""
-    import urllib.error
-    import urllib.request
-
-    if not base_url:
-        raise ValueError("base_url required")
-
-    url = f"{base_url}{path}"
-    default_headers = {"Content-Type": "application/json"}
-    if headers:
-        default_headers.update(headers)
-
-    req = urllib.request.Request(url, headers=default_headers, method=method)
-    if data:
-        req.data = json.dumps(data).encode("utf-8")
-
-    try:
-        with urllib.request.urlopen(req, timeout=10) as response:
-            body = response.read().decode("utf-8")
-            try:
-                return response.status, json.loads(body) if body else {}
-            except json.JSONDecodeError:
-                return response.status, {"raw": body}
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8") if e.fp else ""
+def _parse_json_field(value: str | dict | None) -> dict[str, Any] | None:
+    """Parse JSON field, handling both string and dict inputs."""
+    if not value:
+        return None
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
         try:
-            error_data = json.loads(body) if body else {}
+            return json.loads(value)
         except json.JSONDecodeError:
-            error_data = {"error": body}
-        return e.code, error_data
-    except Exception as e:
-        return 500, {"error": str(e)}
+            return None
+    return None
 
 
 def register(mcp: FastMCP) -> None:
@@ -127,108 +103,88 @@ def register(mcp: FastMCP) -> None:
         per_page: int = 0,
     ) -> dict[str, Any] | list[dict[str, Any]] | str | None:
         client, workspace_slug = get_plane_client_context()
+        base_url = client.config.base_url
 
         if not project_id:
             return missing(action, "project_id")
 
-        # Get base_url and api_key from client config
-        base_url = client.config.base_url.rstrip("/")
-        api_key = client.config.api_key
-
-        if not api_key:
-            return "Error: API key required for view operations"
-
-        headers = {"x-api-key": api_key}
-
+        # List saved views
         if action == "list":
             path = f"/api/workspaces/{workspace_slug}/projects/{project_id}/issue-views/"
-            if cursor:
-                path += f"?cursor={cursor}"
-            if per_page:
-                sep = "&" if cursor else "?"
-                path += f"{sep}per_page={per_page}"
+            if cursor or per_page:
+                query_parts = []
+                if cursor:
+                    query_parts.append(f"cursor={cursor}")
+                if per_page:
+                    query_parts.append(f"per_page={per_page}")
+                path += f"?{'&'.join(query_parts)}"
 
-            status, response = _make_http_request("GET", path, base_url=base_url, headers=headers)
+            status, response = make_http_request("GET", path, base_url)
             if status == 200:
                 return response
             return f"Error listing views: {status} {response}"
 
+        # Retrieve a saved view
         if action == "retrieve":
             if not view_id:
                 return missing(action, "view_id")
-            path = (
-                f"/api/workspaces/{workspace_slug}/projects/{project_id}/issue-views/{view_id}/"
-            )
-            status, response = _make_http_request("GET", path, base_url=base_url, headers=headers)
+
+            path = f"/api/workspaces/{workspace_slug}/projects/{project_id}/issue-views/{view_id}/"
+            status, response = make_http_request("GET", path, base_url)
             if status == 200:
                 return response
             return f"Error retrieving view: {status} {response}"
 
+        # Create a saved view
         if action == "create":
             if not name:
                 return missing(action, "name")
 
-            # Parse JSON fields if provided as strings
-            filters_obj = None
-            if filters:
-                try:
-                    filters_obj = json.loads(filters) if isinstance(filters, str) else filters
-                except json.JSONDecodeError:
-                    return "Error: filters must be valid JSON"
+            data = {"name": name}
+            if description:
+                data["description"] = description
+            if access is not None:
+                data["access"] = access
 
-            display_filters_obj = None
-            if display_filters:
-                try:
-                    display_filters_obj = (
-                        json.loads(display_filters)
-                        if isinstance(display_filters, str)
-                        else display_filters
-                    )
-                except json.JSONDecodeError:
-                    return "Error: display_filters must be valid JSON"
+            # Parse JSON fields
+            filters_obj = _parse_json_field(filters)
+            if filters_obj is not None:
+                data["filters"] = filters_obj
+            elif filters:
+                return "Error: filters must be valid JSON"
 
-            display_properties_obj = None
-            if display_properties:
-                try:
-                    display_properties_obj = (
-                        json.loads(display_properties)
-                        if isinstance(display_properties, str)
-                        else display_properties
-                    )
-                except json.JSONDecodeError:
-                    return "Error: display_properties must be valid JSON"
+            display_filters_obj = _parse_json_field(display_filters)
+            if display_filters_obj is not None:
+                data["display_filters"] = display_filters_obj
+            elif display_filters:
+                return "Error: display_filters must be valid JSON"
 
-            rich_filters_obj = None
-            if rich_filters:
-                try:
-                    rich_filters_obj = (
-                        json.loads(rich_filters) if isinstance(rich_filters, str) else rich_filters
-                    )
-                except json.JSONDecodeError:
-                    return "Error: rich_filters must be valid JSON"
+            display_properties_obj = _parse_json_field(display_properties)
+            if display_properties_obj is not None:
+                data["display_properties"] = display_properties_obj
+            elif display_properties:
+                return "Error: display_properties must be valid JSON"
 
-            data = {
-                "name": name,
-                "description": opt(description),
-                "access": access,
-                "filters": filters_obj,
-                "display_filters": display_filters_obj,
-                "display_properties": display_properties_obj,
-                "rich_filters": rich_filters_obj,
-                "sort_order": opt(sort_order) if sort_order else None,
-            }
-            # Remove None values
-            data = {k: v for k, v in data.items() if v is not None}
+            rich_filters_obj = _parse_json_field(rich_filters)
+            if rich_filters_obj is not None:
+                data["rich_filters"] = rich_filters_obj
+            elif rich_filters:
+                return "Error: rich_filters must be valid JSON"
+
+            if sort_order:
+                data["sort_order"] = sort_order
 
             path = f"/api/workspaces/{workspace_slug}/projects/{project_id}/issue-views/"
-            status, response = _make_http_request("POST", path, data=data, base_url=base_url, headers=headers)
+            status, response = make_http_request("POST", path, base_url, data=data)
             if status in (200, 201):
                 return response
             return f"Error creating view: {status} {response}"
 
+        # Update a saved view
         if action == "update":
             if not view_id:
                 return missing(action, "view_id")
+
             has_update = (
                 name
                 or description
@@ -242,73 +198,55 @@ def register(mcp: FastMCP) -> None:
             if not has_update:
                 return "Error: provide at least one field to update"
 
-            # Parse JSON fields if provided as strings
-            filters_obj = None
-            if filters:
-                try:
-                    filters_obj = json.loads(filters) if isinstance(filters, str) else filters
-                except json.JSONDecodeError:
-                    return "Error: filters must be valid JSON"
+            data = {}
+            if name:
+                data["name"] = name
+            if description:
+                data["description"] = description
+            if access is not None:
+                data["access"] = access
 
-            display_filters_obj = None
-            if display_filters:
-                try:
-                    display_filters_obj = (
-                        json.loads(display_filters)
-                        if isinstance(display_filters, str)
-                        else display_filters
-                    )
-                except json.JSONDecodeError:
-                    return "Error: display_filters must be valid JSON"
+            # Parse JSON fields
+            filters_obj = _parse_json_field(filters)
+            if filters_obj is not None:
+                data["filters"] = filters_obj
+            elif filters:
+                return "Error: filters must be valid JSON"
 
-            display_properties_obj = None
-            if display_properties:
-                try:
-                    display_properties_obj = (
-                        json.loads(display_properties)
-                        if isinstance(display_properties, str)
-                        else display_properties
-                    )
-                except json.JSONDecodeError:
-                    return "Error: display_properties must be valid JSON"
+            display_filters_obj = _parse_json_field(display_filters)
+            if display_filters_obj is not None:
+                data["display_filters"] = display_filters_obj
+            elif display_filters:
+                return "Error: display_filters must be valid JSON"
 
-            rich_filters_obj = None
-            if rich_filters:
-                try:
-                    rich_filters_obj = (
-                        json.loads(rich_filters) if isinstance(rich_filters, str) else rich_filters
-                    )
-                except json.JSONDecodeError:
-                    return "Error: rich_filters must be valid JSON"
+            display_properties_obj = _parse_json_field(display_properties)
+            if display_properties_obj is not None:
+                data["display_properties"] = display_properties_obj
+            elif display_properties:
+                return "Error: display_properties must be valid JSON"
 
-            data = {
-                "name": opt(name),
-                "description": opt(description),
-                "access": access,
-                "filters": filters_obj,
-                "display_filters": display_filters_obj,
-                "display_properties": display_properties_obj,
-                "rich_filters": rich_filters_obj,
-                "sort_order": opt(sort_order) if sort_order else None,
-            }
-            # Remove None values
-            data = {k: v for k, v in data.items() if v is not None}
+            rich_filters_obj = _parse_json_field(rich_filters)
+            if rich_filters_obj is not None:
+                data["rich_filters"] = rich_filters_obj
+            elif rich_filters:
+                return "Error: rich_filters must be valid JSON"
 
-            path = (
-                f"/api/workspaces/{workspace_slug}/projects/{project_id}/issue-views/{view_id}/"
-            )
-            status, response = _make_http_request("PATCH", path, data=data, base_url=base_url, headers=headers)
+            if sort_order:
+                data["sort_order"] = sort_order
+
+            path = f"/api/workspaces/{workspace_slug}/projects/{project_id}/issue-views/{view_id}/"
+            status, response = make_http_request("PATCH", path, base_url, data=data)
             if status == 200:
                 return response
             return f"Error updating view: {status} {response}"
 
+        # Delete a saved view
         if action == "delete":
             if not view_id:
                 return missing(action, "view_id")
-            path = (
-                f"/api/workspaces/{workspace_slug}/projects/{project_id}/issue-views/{view_id}/"
-            )
-            status, response = _make_http_request("DELETE", path, base_url=base_url, headers=headers)
+
+            path = f"/api/workspaces/{workspace_slug}/projects/{project_id}/issue-views/{view_id}/"
+            status, response = make_http_request("DELETE", path, base_url)
             if status in (200, 204):
                 return None
             return f"Error deleting view: {status} {response}"
