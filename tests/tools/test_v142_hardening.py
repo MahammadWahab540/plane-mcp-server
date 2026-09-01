@@ -2,13 +2,12 @@
 
 Covers:
 - API key authentication
-- OAuth bearer token authentication  
+- OAuth bearer token authentication
 - Base URL normalization
 - Project page legacy HTTP routes
 - Project saved view legacy HTTP routes
 """
 
-import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -109,28 +108,43 @@ def test_http_helper_make_request_normalizes_base_url():
             mock_urlopen.return_value.__enter__.return_value = mock_response
 
             status, response = make_http_request(
-                "GET", "/api/workspaces/test/projects/123/pages/", "https://plane.example.com/api/"
+                "GET",
+                "/api/workspaces/test/projects/123/pages/",
+                "https://plane.example.com/api/",
             )
 
             # Verify URL was normalized (no double /api)
             called_url = mock_urlopen.call_args[0][0].full_url
-            assert called_url == "https://plane.example.com/api/workspaces/test/projects/123/pages/"
+            assert (
+                called_url
+                == "https://plane.example.com/api/workspaces/test/projects/123/pages/"
+            )
             assert status == 200
 
 
 def test_page_tool_routes_registered():
     """Test that page tool is registered with correct routes."""
-    from plane_mcp.tools.page import NAME, ACTIONS
+    from plane_mcp.tools.page import ACTIONS, NAME
 
     assert NAME == "page"
     action_names = {a.name for a in ACTIONS}
-    expected = {"list", "retrieve", "create", "update", "archive", "delete", "list_workitem_pages", "attach_to_workitem", "detach_from_workitem"}
+    expected = {
+        "list",
+        "retrieve",
+        "create",
+        "update",
+        "archive",
+        "delete",
+        "list_workitem_pages",
+        "attach_to_workitem",
+        "detach_from_workitem",
+    }
     assert expected.issubset(action_names)
 
 
 def test_view_tool_routes_registered():
     """Test that view tool is registered with correct routes."""
-    from plane_mcp.tools.view import NAME, ACTIONS
+    from plane_mcp.tools.view import ACTIONS, NAME
 
     assert NAME == "view"
     action_names = {a.name for a in ACTIONS}
@@ -163,7 +177,7 @@ def test_view_parse_json_field_rejects_invalid():
     from plane_mcp.tools.view import _parse_json_field
 
     # Invalid JSON returns None
-    result = _parse_json_field('invalid json {')
+    result = _parse_json_field("invalid json {")
     assert result is None
 
 
