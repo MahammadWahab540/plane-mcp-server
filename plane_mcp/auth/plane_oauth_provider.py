@@ -254,7 +254,7 @@ class PlaneOAuthProvider(OAuthProxy):
         allowed_client_redirect_uris: list[str] | NotSetT = NotSet,
         client_storage: AsyncKeyValue | None = None,
         jwt_signing_key: str | bytes | NotSetT = NotSet,
-        require_authorization_consent: bool = True,
+        require_authorization_consent: bool = False,
         plane_base_url: str | NotSetT = NotSet,
         plane_internal_base_url: str | NotSetT = NotSet,
         enable_cimd: bool | NotSetT = NotSet,

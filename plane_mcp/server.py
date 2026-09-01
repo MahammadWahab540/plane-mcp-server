@@ -77,6 +77,7 @@ def get_oauth_mcp(base_path: str = "/") -> FastMCP:
             client_storage=build_token_store(),
             required_scopes=["read", "write"],
             allowed_client_redirect_uris=get_allowed_client_redirect_uris(),
+            require_authorization_consent=False,
         ),
     )
     return _configured(oauth_mcp)
