@@ -37,6 +37,7 @@ from plane_mcp.tools import (
     release_tag,
     state,
     template,
+    view,
     work_log,
     workitem,
     workitem_activity,
@@ -68,6 +69,7 @@ RESOURCES: tuple[ModuleType, ...] = (
     release_label,
     release_tag,
     state,
+    view,
     work_log,
     workitem,
     workitem_activity,
@@ -121,3 +123,4 @@ def unmapped_table() -> dict[str, str]:
                 raise ValueError(f"{legacy} is declared unmapped with no reason")
             table[legacy] = reason
     return table
+
