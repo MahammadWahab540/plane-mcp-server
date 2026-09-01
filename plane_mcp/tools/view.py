@@ -15,7 +15,7 @@ from fastmcp import FastMCP
 
 from plane_mcp.client import get_plane_client_context
 from plane_mcp.toolkit import Action, build_annotations, build_description, missing
-from plane_mcp.tools.http_helper import make_http_request
+from plane_mcp.tools.http_helper import get_base_url, make_http_request
 
 NAME = "view"
 TITLE = "Saved Views (Issue Views)"
@@ -103,7 +103,11 @@ def register(mcp: FastMCP) -> None:
         per_page: int = 0,
     ) -> dict[str, Any] | list[dict[str, Any]] | str | None:
         client, workspace_slug = get_plane_client_context()
-        base_url = client.config.base_url
+
+        try:
+            base_url = get_base_url()
+        except ValueError as e:
+            return f"Error: {str(e)}"
 
         if not project_id:
             return missing(action, "project_id")
@@ -146,7 +150,6 @@ def register(mcp: FastMCP) -> None:
             if access is not None:
                 data["access"] = access
 
-            # Parse JSON fields
             filters_obj = _parse_json_field(filters)
             if filters_obj is not None:
                 data["filters"] = filters_obj
@@ -206,7 +209,6 @@ def register(mcp: FastMCP) -> None:
             if access is not None:
                 data["access"] = access
 
-            # Parse JSON fields
             filters_obj = _parse_json_field(filters)
             if filters_obj is not None:
                 data["filters"] = filters_obj
